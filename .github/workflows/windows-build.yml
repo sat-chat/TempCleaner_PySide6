@@ -1,11 +1,10 @@
 name: Windows build & Release
 
-# Run on manual dispatch and on pushed tags (eg. v1.0.0)
 on:
   push:
     tags:
-      - 'v*'          # build and create release when a tag like v1.0.0 is pushed
-  workflow_dispatch:  # allow manual run from Actions tab
+      - 'v*'
+  workflow_dispatch:
 
 jobs:
   build-windows:
@@ -29,23 +28,12 @@ jobs:
           pip install -r requirements.txt
           pip install pyinstaller
 
-      - name: Show Python and pip versions
-        run: |
-          python --version
-          pip --version
-
       - name: Build single-file EXE with PyInstaller
         run: |
-          # Clean previous builds
           if exist build rmdir /s /q build
           if exist dist rmdir /s /q dist
           if exist TempCleaner.spec del /q TempCleaner.spec
           pyinstaller --onefile --noconsole --name TempCleaner --icon=resources/icon.ico main.py
-
-      - name: List build outputs
-        run: |
-          dir dist
-          dir dist\TempCleaner.exe
 
       - name: Upload EXE as workflow artifact
         uses: actions/upload-artifact@v4
@@ -53,7 +41,6 @@ jobs:
           name: TempCleaner-exe
           path: dist/TempCleaner.exe
 
-      # Only create a GitHub Release when this workflow is triggered by a pushed tag
       - name: Create GitHub Release (on tag) and upload EXE
         if: startsWith(github.ref, 'refs/tags/')
         uses: actions/create-release@v1
