@@ -1,256 +1,68 @@
-#!/usr/bin/env python3
-"""
-TempCleaner - Modern UI (PySide6)
+name: Windows build & Release
 
-Run with: python main.py
-Build EXE:
-  pip install -r requirements.txt
-  pyinstaller --onefile --noconsole --name TempCleaner --icon=resources/icon.ico main.py
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
 
-This app is a modern UI front-end for the temp cleaner actions.
-"""
-import sys
-import os
-import tempfile
-import json
-import shutil
-import ctypes
-from pathlib import Path
-from PySide6 import QtCore, QtGui, QtWidgets
+jobs:
+  build-windows:
+    name: Build on Windows
+    runs-on: windows-latest
+    env:
+      PYTHON_VERSION: '3.11'
 
-# Paths
-USER_TEMP = os.environ.get("TEMP", os.path.join(os.environ.get("USERPROFILE", ""), "AppData", "Local", "Temp"))
-WIN_TEMP = r"C:\Windows\Temp"
-PREFETCH = r"C:\Windows\Prefetch"
-RECENT = os.path.join(os.environ.get('APPDATA', ''), r'Microsoft\Windows\Recent')
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-def is_admin():
-    try:
-        return ctypes.windll.shell32.IsUserAnAdmin() != 0
-    except Exception:
-        return False
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
 
-def empty_recycle_bin(log):
-    try:
-        shell32 = ctypes.windll.shell32
-        SHERB_NOCONFIRMATION = 0x00000001
-        SHERB_NOPROGRESSUI   = 0x00000002
-        flags = SHERB_NOCONFIRMATION | SHERB_NOPROGRESSUI
-        res = shell32.SHEmptyRecycleBinW(None, None, flags)
-        if res == 0:
-            log("Recycle Bin emptied.")
-        else:
-            log(f"Recycle Bin empty failed. HRESULT: {res}")
-    except Exception as e:
-        log(f"Error emptying Recycle Bin: {e}")
+      - name: Install build dependencies
+        run: |
+          python -m pip install --upgrade pip wheel
+          pip install -r requirements.txt
+          pip install pyinstaller
 
-def report_size(path):
-    total_bytes = 0
-    count = 0
-    if not os.path.exists(path):
-        return count, total_bytes
-    for root, dirs, files in os.walk(path):
-        for f in files:
-            count += 1
-            try:
-                total_bytes += os.path.getsize(os.path.join(root, f))
-            except Exception:
-                pass
-    return count, total_bytes
+      - name: Clean previous builds
+        shell: pwsh
+        run: |
+          if (Test-Path "build") { Remove-Item -Recurse -Force "build" }
+          if (Test-Path "dist") { Remove-Item -Recurse -Force "dist" }
+          if (Test-Path "TempCleaner.spec") { Remove-Item -Force "TempCleaner.spec" }
 
-def safe_delete_path(path, log):
-    if not os.path.exists(path):
-        log(f"Not found: {path}")
-        return
-    for root, dirs, files in os.walk(path, topdown=False):
-        for name in files:
-            fp = os.path.join(root, name)
-            try:
-                os.remove(fp)
-            except Exception as e:
-                log(f"Failed to delete file: {fp} ({e})")
-        for name in dirs:
-            dp = os.path.join(root, name)
-            try:
-                shutil.rmtree(dp, ignore_errors=True)
-            except Exception as e:
-                log(f"Failed to remove dir: {dp} ({e})")
-    log(f"Cleared contents of: {path}")
+      - name: Build single-file EXE with PyInstaller
+        run: |
+          pyinstaller --onefile --noconsole --name TempCleaner --icon=resources/icon.ico main.py
 
-class Worker(QtCore.QRunnable):
-    def __init__(self, cfg, dryrun, log_fn, finished_fn):
-        super().__init__()
-        self.cfg = cfg
-        self.dryrun = dryrun
-        self.log = log_fn
-        self.finished_fn = finished_fn
+      - name: Upload EXE as workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: TempCleaner-exe
+          path: dist/TempCleaner.exe
 
-    def run(self):
-        self.log(f"Starting actions (dryrun={self.dryrun})...")
-        if self.cfg.get("user_temp"):
-            cnt, size = report_size(USER_TEMP)
-            self.log(f"User Temp: {cnt} items, {size} bytes.")
-            if not self.dryrun:
-                safe_delete_path(USER_TEMP, self.log)
-        if self.cfg.get("windows_temp"):
-            cnt, size = report_size(WIN_TEMP)
-            self.log(f"Windows Temp: {cnt} items, {size} bytes.")
-            if not self.dryrun:
-                safe_delete_path(WIN_TEMP, self.log)
-        if self.cfg.get("prefetch"):
-            cnt, size = report_size(PREFETCH)
-            self.log(f"Prefetch: {cnt} items, {size} bytes.")
-            if not self.dryrun:
-                safe_delete_path(PREFETCH, self.log)
-        if self.cfg.get("recent"):
-            cnt, size = report_size(RECENT)
-            self.log(f"Recent: {cnt} items, {size} bytes.")
-            if not self.dryrun:
-                safe_delete_path(RECENT, self.log)
-        if self.cfg.get("recycle"):
-            if self.dryrun:
-                self.log("Recycle Bin: (dry-run) size/count not computed precisely.")
-            else:
-                empty_recycle_bin(self.log)
-        self.log("All selected actions completed.")
-        # Notify finished on the main thread
-        try:
-            QtCore.QMetaObject.invokeMethod(self.finished_fn, "__call__", QtCore.Qt.QueuedConnection)
-        except Exception:
-            # fallback to direct call if invokeMethod fails
-            try:
-                self.finished_fn()
-            except Exception:
-                pass
+      - name: Create GitHub Release (on tag)
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: actions/create-release@v1
+        with:
+          tag_name: ${{ github.ref_name }}
+          release_name: Release ${{ github.ref_name }}
+          body: |
+            Auto-built release for tag ${{ github.ref_name }}.
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-class MainWindow(QtWidgets.QMainWindow):
-    def __init__(self):
-        super().__init__()
-        self.setWindowTitle("TempCleaner")
-        self.setMinimumSize(620, 460)
-        app_icon = QtGui.QIcon(str(Path(__file__).parent / "resources" / "icon.png"))
-        self.setWindowIcon(app_icon)
-        self.threadpool = QtCore.QThreadPool.globalInstance()
-        self.build_ui()
-
-    def build_ui(self):
-        w = QtWidgets.QWidget()
-        self.setCentralWidget(w)
-        layout = QtWidgets.QVBoxLayout(w)
-        # Actions group
-        actions_group = QtWidgets.QGroupBox("Actions")
-        actions_layout = QtWidgets.QGridLayout()
-        self.cb_user_temp = QtWidgets.QCheckBox(f"User Temp ({USER_TEMP})")
-        self.cb_user_temp.setChecked(True)
-        self.cb_win_temp  = QtWidgets.QCheckBox(f"Windows Temp ({WIN_TEMP})")
-        self.cb_prefetch  = QtWidgets.QCheckBox(f"Prefetch ({PREFETCH})")
-        self.cb_recent    = QtWidgets.QCheckBox("Recent Documents")
-        self.cb_recycle   = QtWidgets.QCheckBox("Empty Recycle Bin")
-        self.cb_dryrun    = QtWidgets.QCheckBox("Dry-run (report only)")
-        self.cb_dryrun.setChecked(True)
-
-        actions_layout.addWidget(self.cb_user_temp, 0, 0)
-        actions_layout.addWidget(self.cb_win_temp, 1, 0)
-        actions_layout.addWidget(self.cb_prefetch, 2, 0)
-        actions_layout.addWidget(self.cb_recent, 3, 0)
-        actions_layout.addWidget(self.cb_recycle, 4, 0)
-        actions_layout.addWidget(self.cb_dryrun, 5, 0)
-        actions_group.setLayout(actions_layout)
-        layout.addWidget(actions_group)
-
-        # Buttons
-        btn_layout = QtWidgets.QHBoxLayout()
-        self.run_btn = QtWidgets.QPushButton("Run")
-        self.run_btn.clicked.connect(self.on_run)
-        self.exit_btn = QtWidgets.QPushButton("Exit")
-        self.exit_btn.clicked.connect(QtWidgets.QApplication.quit)
-        btn_layout.addWidget(self.run_btn)
-        btn_layout.addWidget(self.exit_btn)
-        layout.addLayout(btn_layout)
-
-        # Log area
-        self.logview = QtWidgets.QPlainTextEdit()
-        self.logview.setReadOnly(True)
-        layout.addWidget(QtWidgets.QLabel("Log (actions & results):"))
-        layout.addWidget(self.logview, 1)
-
-        # status bar
-        self.status = QtWidgets.QStatusBar()
-        self.setStatusBar(self.status)
-        self.log(f"User Temp: {USER_TEMP}")
-        self.log(f"Windows Temp: {WIN_TEMP}")
-        self.log(f"Prefetch: {PREFETCH}")
-        self.log(f"Recent: {RECENT}")
-        self.log(f"Running elevated: {is_admin()}")
-
-    def log(self, msg):
-        self.logview.appendPlainText(msg)
-        self.status.showMessage(msg, 5000)
-
-    def get_cfg(self):
-        return {
-            "user_temp": self.cb_user_temp.isChecked(),
-            "windows_temp": self.cb_win_temp.isChecked(),
-            "prefetch": self.cb_prefetch.isChecked(),
-            "recent": self.cb_recent.isChecked(),
-            "recycle": self.cb_recycle.isChecked(),
-            "dryrun": self.cb_dryrun.isChecked()
-        }
-
-    def request_elevation(self, cfg):
-        # write cfg to temp and relaunch elevated
-        tmpf = os.path.join(tempfile.gettempdir(), f"tempcleaner_cfg_{os.getpid()}.json")
-        with open(tmpf, "w", encoding="utf-8") as f:
-            json.dump(cfg, f)
-        ctypes.windll.shell32.ShellExecuteW(None, "runas", sys.executable, f'"{os.path.abspath(__file__)}" --elevated-config "{tmpf}"', None, 1)
-        QtWidgets.QApplication.quit()
-
-    def on_run(self):
-        cfg = self.get_cfg()
-        requires_admin = cfg.get("windows_temp") or cfg.get("recycle")
-        if requires_admin and not is_admin():
-            self.log("Admin required for selected actions. Requesting elevation...")
-            self.request_elevation(cfg)
-            return
-        # If launched with --elevated-config, auto-run is handled in entrypoint below
-        self.run_worker(cfg, cfg.get("dryrun", True))
-
-    def run_worker(self, cfg, dryrun):
-        self.run_btn.setEnabled(False)
-        worker = Worker(cfg, dryrun, self.log, self.on_finished)
-        self.threadpool.start(worker)
-
-    @QtCore.Slot()
-    def on_finished(self):
-        self.run_btn.setEnabled(True)
-        self.log("Operation finished.")
-
-def main():
-    elevated_cfg_path = None
-    if "--elevated-config" in sys.argv:
-        try:
-            idx = sys.argv.index("--elevated-config")
-            elevated_cfg_path = sys.argv[idx + 1]
-        except Exception:
-            elevated_cfg_path = None
-
-    app = QtWidgets.QApplication(sys.argv)
-    window = MainWindow()
-    window.show()
-    # If elevated config present, read and auto-run
-    if elevated_cfg_path:
-        try:
-            with open(elevated_cfg_path, "r", encoding="utf-8") as f:
-                cfg = json.load(f)
-            try:
-                os.remove(elevated_cfg_path)
-            except Exception:
-                pass
-            # auto-run after main loop starts
-            QtCore.QTimer.singleShot(500, lambda: window.run_worker(cfg, cfg.get("dryrun", True)))
-        except Exception as e:
-            window.log(f"Failed to load elevated config: {e}")
-    sys.exit(app.exec())
-
-if __name__ == "__main__":
-    main()
+      - name: Upload EXE to release (on tag)
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: actions/upload-release-asset@v1
+        with:
+          upload_url: ${{ steps.create_release.outputs.upload_url }}
+          asset_path: dist/TempCleaner.exe
+          asset_name: TempCleaner-${{ github.ref_name }}.exe
+          asset_content_type: application/octet-stream
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
