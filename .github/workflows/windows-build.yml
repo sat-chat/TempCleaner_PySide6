@@ -28,11 +28,15 @@ jobs:
           pip install -r requirements.txt
           pip install pyinstaller
 
+      - name: Clean previous builds
+        shell: pwsh
+        run: |
+          if (Test-Path "build") { Remove-Item -Recurse -Force "build" }
+          if (Test-Path "dist") { Remove-Item -Recurse -Force "dist" }
+          if (Test-Path "TempCleaner.spec") { Remove-Item -Force "TempCleaner.spec" }
+
       - name: Build single-file EXE with PyInstaller
         run: |
-          if exist build rmdir /s /q build
-          if exist dist rmdir /s /q dist
-          if exist TempCleaner.spec del /q TempCleaner.spec
           pyinstaller --onefile --noconsole --name TempCleaner --icon=resources/icon.ico main.py
 
       - name: Upload EXE as workflow artifact
@@ -41,14 +45,12 @@ jobs:
           name: TempCleaner-exe
           path: dist/TempCleaner.exe
 
-      - name: Create GitHub Release (on tag) and upload EXE
+      - name: Create GitHub Release (on tag)
         if: startsWith(github.ref, 'refs/tags/')
         uses: actions/create-release@v1
         with:
           tag_name: ${{ github.ref_name }}
           release_name: Release ${{ github.ref_name }}
-          draft: false
-          prerelease: false
           body: |
             Auto-built release for tag ${{ github.ref_name }}.
         env:
